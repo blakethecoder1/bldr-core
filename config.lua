@@ -59,6 +59,60 @@ Config.Performance = {
     batchSaveSize = 10        -- Max players to save in one batch operation
 }
 
+-- Unified Quality System
+-- Quality affects item value, effectiveness, and visual appearance
+Config.Quality = {
+    enabled = true,
+    tiers = {
+        poor = { min = 0, max = 39, multiplier = 0.6, color = '#808080', label = 'Poor' },
+        common = { min = 40, max = 69, multiplier = 1.0, color = '#FFFFFF', label = 'Common' },
+        good = { min = 70, max = 89, multiplier = 1.5, color = '#1eff00', label = 'Good' },
+        excellent = { min = 90, max = 100, multiplier = 2.0, color = '#0070dd', label = 'Excellent' }
+    },
+    factors = {
+        playerLevel = 0.3,     -- 30% influence from player level
+        equipment = 0.2,       -- 20% from tools/upgrades
+        minigame = 0.3,        -- 30% from skill performance
+        random = 0.2           -- 20% random variance
+    }
+}
+
+-- Player Statistics Tracking
+Config.Statistics = {
+    enabled = true,
+    tracked = {
+        -- Farming stats
+        'plants_planted',
+        'plants_harvested',
+        'total_farming_xp',
+        -- Crafting stats
+        'items_crafted',
+        'recipes_unlocked',
+        'total_crafting_xp',
+        -- Economic stats
+        'money_earned',
+        'money_spent',
+        -- General stats
+        'total_xp',
+        'sessions_played',
+        'time_played'
+    },
+    saveInterval = 600000  -- Save stats every 10 minutes
+}
+
+-- Leaderboards System
+Config.Leaderboards = {
+    enabled = true,
+    updateInterval = 300000,  -- Update every 5 minutes
+    categories = {
+        { id = 'total_xp', label = 'Top Players', icon = 'fas fa-trophy' },
+        { id = 'plants_harvested', label = 'Top Farmers', icon = 'fas fa-seedling' },
+        { id = 'items_crafted', label = 'Top Crafters', icon = 'fas fa-hammer' },
+        { id = 'money_earned', label = 'Top Earners', icon = 'fas fa-dollar-sign' }
+    },
+    displayCount = 10  -- Show top 10 players per category
+}
+
 -- Optional debug flag.  When true the core will print verbose
 -- information to the server console to help diagnose issues.
-Config.Debug = false
+Config.Debug = true

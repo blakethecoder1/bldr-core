@@ -27,8 +27,13 @@ server_scripts {
     'server/main.lua'
 }
 
+client_scripts {
+    'client/stats.lua'
+}
+
 files {
-    'sql/bldr_core.sql'
+    'sql/bldr_core.sql',
+    'sql/migration_stats_leaderboards.sql'
 }
 
 -- No client scripts are included; this resource is server‑only.

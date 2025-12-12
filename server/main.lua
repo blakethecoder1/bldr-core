@@ -98,6 +98,11 @@ exports('AddXP', function(src, amount)
     -- Save to database
     savePlayerData(src, pdata.xp, pdata.level)
     
+    -- Update total_xp in stats if statistics system is enabled
+    if Config.Statistics and Config.Statistics.enabled then
+        exports['bldr-core']:UpdateStat(src, 'total_xp', amount)
+    end
+    
     -- Notify player of level up
     if newLevel > oldLevel then
         local levelConfig = Config.Levels[newLevel + 1] -- +1 because array is 1-indexed but levels start at 0
@@ -453,3 +458,397 @@ RegisterCommand('addxp', function(source, args, rawCommand)
         TriggerClientEvent('QBCore:Notify', source, success, 'success')
     end
 end, false)
+
+-- =================================================================
+-- PLAYER STATISTICS SYSTEM
+-- =================================================================
+
+local PlayerStats = {}
+
+-- Initialize or load player statistics
+local function loadPlayerStats(src)
+    local license = getPlayerLicense(src)
+    if not license then return nil end
+    
+    -- Check cache
+    if PlayerStats[license] then
+        return PlayerStats[license]
+    end
+    
+    -- Load from database
+    local result = MySQL.Sync.fetchAll('SELECT * FROM bldr_player_stats WHERE license = ?', { license })
+    
+    local stats
+    if result and #result > 0 then
+        stats = json.decode(result[1].stats) or {}
+        if Config.Debug then
+            print(('[bldr_core] Loaded stats for %s: %s'):format(license, json.encode(stats)))
+        end
+    else
+        -- Create default stats
+        stats = {
+            plants_planted = 0,
+            plants_harvested = 0,
+            total_farming_xp = 0,
+            items_crafted = 0,
+            recipes_unlocked = 0,
+            total_crafting_xp = 0,
+            money_earned = 0,
+            money_spent = 0,
+            total_xp = 0,
+            sessions_played = 1,
+            time_played = 0,
+            session_start = os.time()
+        }
+        MySQL.Async.execute('INSERT INTO bldr_player_stats (license, stats) VALUES (?, ?)', {
+            license, json.encode(stats)
+        }, function(affectedRows)
+            if Config.Debug then
+                print(('[bldr_core] Created new stats for %s'):format(license))
+            end
+        end)
+    end
+    
+    stats.session_start = os.time()
+    PlayerStats[license] = stats
+    return stats
+end
+
+-- Save player statistics
+local function savePlayerStats(src)
+    local license = getPlayerLicense(src)
+    if not license or not PlayerStats[license] then return end
+    
+    -- Update time played
+    if PlayerStats[license].session_start then
+        local sessionTime = os.time() - PlayerStats[license].session_start
+        PlayerStats[license].time_played = (PlayerStats[license].time_played or 0) + sessionTime
+        PlayerStats[license].session_start = os.time()
+    end
+    
+    MySQL.Async.execute('UPDATE bldr_player_stats SET stats = ? WHERE license = ?', {
+        json.encode(PlayerStats[license]), license
+    })
+end
+
+-- Update a specific stat
+exports('UpdateStat', function(src, statName, value)
+    if not Config.Statistics or not Config.Statistics.enabled then return end
+    
+    local stats = loadPlayerStats(src)
+    if not stats then 
+        if Config.Debug then
+            print(('[bldr_core] ERROR: Failed to load stats for player %d when updating %s'):format(src, statName))
+        end
+        return 
+    end
+    
+    local license = getPlayerLicense(src)
+    if not license then return end
+    
+    local oldValue = stats[statName] or 0
+    stats[statName] = (stats[statName] or 0) + value
+    PlayerStats[license] = stats
+    
+    if Config.Debug then
+        print(('[bldr_core] UpdateStat: %s for player %d | %s: %d -> %d (+%d)'):format(
+            statName, src, statName, oldValue, stats[statName], value))
+    end
+    
+    -- Save immediately to ensure it's persisted
+    savePlayerStats(src)
+end)
+
+-- Get player statistics
+exports('GetPlayerStatistics', function(src)
+    return loadPlayerStats(src)
+end)
+
+-- Save stats periodically
+if Config.Statistics and Config.Statistics.enabled then
+    CreateThread(function()
+        while true do
+            Wait(Config.Statistics.saveInterval or 600000)
+            
+            for _, playerId in pairs(QBCore.Functions.GetPlayers()) do
+                savePlayerStats(playerId)
+            end
+            
+            if Config.Debug then
+                print('[bldr_core] Auto-saved player statistics')
+            end
+        end
+    end)
+end
+
+-- Save stats on player disconnect
+AddEventHandler('playerDropped', function(reason)
+    savePlayerStats(source)
+    local license = getPlayerLicense(source)
+    if license and PlayerStats[license] then
+        PlayerStats[license] = nil
+    end
+end)
+
+-- Load stats on player join
+RegisterNetEvent('QBCore:Server:PlayerLoaded', function()
+    loadPlayerStats(source)
+end)
+
+-- =================================================================
+-- LEADERBOARDS SYSTEM
+-- =================================================================
+
+local Leaderboards = {}
+
+-- Update leaderboards from database
+local function updateLeaderboards()
+    if not Config.Leaderboards or not Config.Leaderboards.enabled then return end
+    
+    for _, category in ipairs(Config.Leaderboards.categories) do
+        local statKey = category.id
+        
+        -- Query to get leaderboard data with player names
+        -- Fixed collation mismatch by using COLLATE
+        local results = MySQL.Sync.fetchAll([[
+            SELECT 
+                ps.license,
+                ps.stats,
+                JSON_EXTRACT(ps.stats, '$.]] .. statKey .. [[') as stat_value,
+                p.charinfo
+            FROM bldr_player_stats ps
+            LEFT JOIN players p ON ps.license COLLATE utf8mb4_unicode_ci = p.license COLLATE utf8mb4_unicode_ci
+            WHERE JSON_EXTRACT(ps.stats, '$.]] .. statKey .. [[') IS NOT NULL
+                AND CAST(JSON_EXTRACT(ps.stats, '$.]] .. statKey .. [[') AS UNSIGNED) > 0
+            ORDER BY CAST(JSON_EXTRACT(ps.stats, '$.]] .. statKey .. [[') AS UNSIGNED) DESC
+            LIMIT ?
+        ]], { Config.Leaderboards.displayCount or 10 })
+        
+        if results then
+            Leaderboards[statKey] = {}
+            for i, row in ipairs(results) do
+                local stats = json.decode(row.stats) or {}
+                local playerName = 'Unknown'
+                
+                -- Try to get name from charinfo
+                if row.charinfo then
+                    local charinfo = type(row.charinfo) == 'string' and json.decode(row.charinfo) or row.charinfo
+                    if charinfo and charinfo.firstname and charinfo.lastname then
+                        playerName = charinfo.firstname .. ' ' .. charinfo.lastname
+                    end
+                end
+                
+                -- Fallback: check if player is currently online
+                if playerName == 'Unknown' then
+                    local onlinePlayers = QBCore.Functions.GetPlayers()
+                    for _, playerId in pairs(onlinePlayers) do
+                        local Player = QBCore.Functions.GetPlayer(playerId)
+                        if Player and Player.PlayerData.license == row.license then
+                            playerName = Player.PlayerData.charinfo.firstname .. ' ' .. Player.PlayerData.charinfo.lastname
+                            break
+                        end
+                    end
+                end
+                
+                table.insert(Leaderboards[statKey], {
+                    rank = i,
+                    name = playerName,
+                    value = stats[statKey] or 0,
+                    license = row.license
+                })
+            end
+            
+            if Config.Debug then
+                print(('[bldr_core] Updated %s leaderboard with %d entries'):format(statKey, #Leaderboards[statKey]))
+            end
+        end
+    end
+    
+    if Config.Debug then
+        print('[bldr_core] Updated all leaderboards')
+    end
+end
+
+-- Get leaderboard data
+exports('GetLeaderboard', function(category)
+    return Leaderboards[category] or {}
+end)
+
+-- Get all leaderboards
+exports('GetAllLeaderboards', function()
+    return Leaderboards
+end)
+
+-- Update leaderboards periodically
+if Config.Leaderboards and Config.Leaderboards.enabled then
+    CreateThread(function()
+        Wait(10000) -- Wait for database to be ready
+        
+        -- Ensure bldr_player_stats table exists
+        MySQL.Async.execute([[
+            CREATE TABLE IF NOT EXISTS `bldr_player_stats` (
+                `id` int(11) NOT NULL AUTO_INCREMENT,
+                `license` varchar(60) COLLATE utf8mb4_unicode_ci NOT NULL,
+                `stats` longtext COLLATE utf8mb4_unicode_ci DEFAULT '{}',
+                `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `license` (`license`),
+                KEY `idx_license` (`license`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        ]], {}, function()
+            print('[bldr_core] Ensured bldr_player_stats table exists')
+            updateLeaderboards() -- Initial update
+        end)
+        
+        while true do
+            Wait(Config.Leaderboards.updateInterval or 300000)
+            updateLeaderboards()
+        end
+    end)
+end
+
+-- Command to view leaderboards
+RegisterCommand('leaderboard', function(source, args, rawCommand)
+    if source == 0 then
+        print("This command can only be used by players")
+        return
+    end
+    
+    local category = args[1] or 'total_xp'
+    
+    -- Validate category
+    local validCategories = {}
+    for _, cat in ipairs(Config.Leaderboards.categories) do
+        validCategories[cat.id] = true
+    end
+    
+    if not validCategories[category] then
+        TriggerClientEvent('QBCore:Notify', source, 'Invalid category. Use: total_xp, plants_harvested, items_crafted, or money_earned', 'error')
+        return
+    end
+    
+    local leaderboard = Leaderboards[category] or {}
+    
+    if not leaderboard or #leaderboard == 0 then
+        -- Try updating leaderboards first
+        updateLeaderboards()
+        Wait(1000)
+        leaderboard = Leaderboards[category] or {}
+        
+        if #leaderboard == 0 then
+            TriggerClientEvent('QBCore:Notify', source, 'No leaderboard data available yet. Players need to earn stats first!', 'error')
+            
+            if Config.Debug then
+                print('[bldr_core] Leaderboard empty for category: ' .. category)
+                print('[bldr_core] Available categories:', json.encode(Leaderboards))
+            end
+            return
+        end
+    end
+    
+    TriggerClientEvent('bldr_core:showLeaderboard', source, category, leaderboard)
+end, false)
+
+-- Command to view personal statistics
+RegisterCommand('mystats', function(source, args, rawCommand)
+    if source == 0 then
+        print("This command can only be used by players")
+        return
+    end
+    
+    local stats = loadPlayerStats(source)
+    if not stats then
+        TriggerClientEvent('QBCore:Notify', source, 'No statistics available', 'error')
+        return
+    end
+    
+    TriggerClientEvent('bldr_core:showStats', source, stats)
+end, false)
+
+-- Admin command to refresh leaderboards manually
+RegisterCommand('refreshleaderboard', function(source, args, rawCommand)
+    if source ~= 0 then
+        local Player = QBCore.Functions.GetPlayer(source)
+        if not Player then return end
+        
+        local isAdmin = QBCore.Functions.HasPermission(source, 'admin') or 
+                       QBCore.Functions.HasPermission(source, 'god')
+        
+        if not isAdmin then
+            TriggerClientEvent('QBCore:Notify', source, 'You do not have permission', 'error')
+            return
+        end
+    end
+    
+    updateLeaderboards()
+    
+    if source == 0 then
+        print('[bldr_core] Leaderboards refreshed')
+    else
+        TriggerClientEvent('QBCore:Notify', source, 'Leaderboards refreshed', 'success')
+    end
+end, false)
+
+-- =================================================================
+-- QUALITY SYSTEM
+-- =================================================================
+
+-- Calculate item quality based on multiple factors
+exports('CalculateQuality', function(src, baseQuality, factors)
+    if not Config.Quality or not Config.Quality.enabled then
+        return baseQuality or 100
+    end
+    
+    local quality = baseQuality or 50
+    factors = factors or {}
+    
+    -- Player level factor
+    if Config.Quality.factors.playerLevel > 0 then
+        local pdata = loadPlayerData(src)
+        local level = pdata.level or 0
+        local levelBonus = level * 2 -- +2 quality per level
+        quality = quality + (levelBonus * Config.Quality.factors.playerLevel)
+    end
+    
+    -- Equipment factor
+    if factors.equipment and Config.Quality.factors.equipment > 0 then
+        quality = quality + (factors.equipment * Config.Quality.factors.equipment)
+    end
+    
+    -- Minigame factor
+    if factors.minigame and Config.Quality.factors.minigame > 0 then
+        quality = quality + (factors.minigame * Config.Quality.factors.minigame)
+    end
+    
+    -- Random variance
+    if Config.Quality.factors.random > 0 then
+        local variance = math.random(-10, 10)
+        quality = quality + (variance * Config.Quality.factors.random)
+    end
+    
+    -- Clamp between 0 and 100
+    quality = math.max(0, math.min(100, quality))
+    
+    return math.floor(quality)
+end)
+
+-- Get quality tier information
+exports('GetQualityTier', function(quality)
+    if not Config.Quality or not Config.Quality.enabled then
+        return { label = 'Common', multiplier = 1.0, color = '#FFFFFF' }
+    end
+    
+    for tier, data in pairs(Config.Quality.tiers) do
+        if quality >= data.min and quality <= data.max then
+            return {
+                tier = tier,
+                label = data.label,
+                multiplier = data.multiplier,
+                color = data.color
+            }
+        end
+    end
+    
+    return { tier = 'common', label = 'Common', multiplier = 1.0, color = '#FFFFFF' }
+end)
