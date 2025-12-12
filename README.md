@@ -1,6 +1,6 @@
 # BLDR Core
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Author:** blakethepet  
 **Framework:** QBCore  
 **Database:** oxmysql
@@ -17,6 +17,9 @@ This resource eliminates the need for each module to implement its own progressi
 - **8 Progressive Levels** - From Novice to Legendary with increasing multipliers
 - **Level-Based Bonuses** - Automatic money bonuses based on player level
 - **Quality-Based Rewards** - Enhanced payouts for higher quality items
+- **Player Statistics Tracking** - Comprehensive stat tracking for farming, crafting, and economy
+- **Dynamic Leaderboards** - Real-time leaderboards for top players, farmers, crafters, and earners
+- **Quality System** - Multi-factor quality calculation for items and outputs
 - **Persistent Storage** - All player data saved to MySQL database
 - **Performance Optimized** - In-memory caching with configurable auto-save intervals
 - **Flexible Money System** - Support for cash, bank, crypto, black_money, and marked bills
@@ -53,7 +56,7 @@ Configurable multipliers for different activities:
 
 ### 1. Database Setup
 
-Execute the SQL file to create the required table:
+Execute the SQL files to create the required tables:
 
 ```sql
 -- Run sql/bldr_core.sql in your database
@@ -65,6 +68,18 @@ CREATE TABLE IF NOT EXISTS `bldr_player_data` (
   `last_updated` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX `idx_level` (`level`),
   INDEX `idx_xp` (`xp`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Run sql/migration_stats_leaderboards.sql for statistics tracking
+CREATE TABLE IF NOT EXISTS `bldr_player_stats` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `license` varchar(60) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `stats` longtext COLLATE utf8mb4_unicode_ci DEFAULT '{}',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `license` (`license`),
+  KEY `idx_license` (`license`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 ```
 
@@ -130,6 +145,68 @@ Config.Performance = {
 }
 ```
 
+### Statistics Tracking
+
+```lua
+Config.Statistics = {
+    enabled = true,
+    tracked = {
+        -- Farming stats
+        'plants_planted',
+        'plants_harvested',
+        'total_farming_xp',
+        -- Crafting stats
+        'items_crafted',
+        'recipes_unlocked',
+        'total_crafting_xp',
+        -- Economic stats
+        'money_earned',
+        'money_spent',
+        -- General stats
+        'total_xp',
+        'sessions_played',
+        'time_played'
+    },
+    saveInterval = 600000  -- Save stats every 10 minutes
+}
+```
+
+### Leaderboards
+
+```lua
+Config.Leaderboards = {
+    enabled = true,
+    updateInterval = 300000,  -- Update every 5 minutes
+    categories = {
+        { id = 'total_xp', label = 'Top Players', icon = 'fas fa-trophy' },
+        { id = 'plants_harvested', label = 'Top Farmers', icon = 'fas fa-seedling' },
+        { id = 'items_crafted', label = 'Top Crafters', icon = 'fas fa-hammer' },
+        { id = 'money_earned', label = 'Top Earners', icon = 'fas fa-dollar-sign' }
+    },
+    displayCount = 10  -- Show top 10 players per category
+}
+```
+
+### Quality System
+
+```lua
+Config.Quality = {
+    enabled = true,
+    tiers = {
+        poor = { min = 0, max = 39, multiplier = 0.6, color = '#808080', label = 'Poor' },
+        common = { min = 40, max = 69, multiplier = 1.0, color = '#FFFFFF', label = 'Common' },
+        good = { min = 70, max = 89, multiplier = 1.5, color = '#1eff00', label = 'Good' },
+        excellent = { min = 90, max = 100, multiplier = 2.0, color = '#0070dd', label = 'Excellent' }
+    },
+    factors = {
+        playerLevel = 0.3,     -- 30% influence from player level
+        equipment = 0.2,       -- 20% from tools/upgrades
+        minigame = 0.3,        -- 30% from skill performance
+        random = 0.2           -- 20% random variance
+    }
+}
+```
+
 ## 💻 Usage for Developers
 
 ### Server-Side Exports
@@ -191,6 +268,78 @@ print('Multiplier: ' .. stats.multiplier .. 'x')
 print('Next Level: ' .. stats.nextLevelXP .. ' XP')
 ```
 
+#### UpdateStat
+Update a specific player statistic.
+
+```lua
+-- Add to a player's stats
+exports['bldr_core']:UpdateStat(source, 'plants_harvested', 1)
+exports['bldr_core']:UpdateStat(source, 'items_crafted', 1)
+exports['bldr_core']:UpdateStat(source, 'total_farming_xp', 25)
+
+-- Stats are automatically saved to database
+```
+
+#### GetPlayerStatistics
+Get all tracked statistics for a player.
+
+```lua
+local stats = exports['bldr_core']:GetPlayerStatistics(source)
+-- Returns full stats object with all tracked values
+
+print('Plants Harvested: ' .. (stats.plants_harvested or 0))
+print('Items Crafted: ' .. (stats.items_crafted or 0))
+print('Money Earned: $' .. (stats.money_earned or 0))
+```
+
+#### GetLeaderboard
+Get leaderboard data for a specific category.
+
+```lua
+local leaderboard = exports['bldr_core']:GetLeaderboard('total_xp')
+-- Returns array of top players with rank, name, and value
+
+for _, entry in ipairs(leaderboard) do
+    print(entry.rank .. '. ' .. entry.name .. ': ' .. entry.value)
+end
+```
+
+#### GetAllLeaderboards
+Get all leaderboard categories at once.
+
+```lua
+local allLeaderboards = exports['bldr_core']:GetAllLeaderboards()
+-- Returns table with all categories: total_xp, plants_harvested, items_crafted, money_earned
+```
+
+#### CalculateQuality
+Calculate item quality based on multiple factors.
+
+```lua
+local baseQuality = 75
+local factors = {
+    equipment = 10,     -- Bonus from tools/equipment
+    minigame = 15,      -- Bonus from player skill/minigame
+    random = 0          -- Random variance (handled internally)
+}
+
+local finalQuality = exports['bldr_core']:CalculateQuality(source, baseQuality, factors)
+-- Returns quality value 0-100 with player level and factor bonuses applied
+```
+
+#### GetQualityTier
+Get quality tier information for display.
+
+```lua
+local quality = 85
+local tierInfo = exports['bldr_core']:GetQualityTier(quality)
+
+print('Tier: ' .. tierInfo.tier)           -- 'good'
+print('Label: ' .. tierInfo.label)         -- 'Good'
+print('Multiplier: ' .. tierInfo.multiplier) -- 1.5
+print('Color: ' .. tierInfo.color)         -- '#1eff00'
+```
+
 #### IsBLDRAdmin
 Check if a player has admin permissions.
 
@@ -217,24 +366,76 @@ RegisterNetEvent('bldr_farming:harvest', function(cropType, amount)
     -- Add XP (player may level up automatically)
     local newXP, newLevel = exports['bldr_core']:AddXP(src, xpAmount)
     
+    -- Update statistics for leaderboards
+    exports['bldr_core']:UpdateStat(src, 'plants_harvested', amount)
+    exports['bldr_core']:UpdateStat(src, 'total_farming_xp', xpAmount)
+    
     -- Give items to player
     Player.Functions.AddItem(cropType, amount)
+    
+    -- Calculate quality using core system
+    local baseQuality = 75
+    local factors = {
+        equipment = 0,      -- Could be tool bonus
+        minigame = 10,      -- Minigame performance bonus
+        random = 0
+    }
+    local quality = exports['bldr_core']:CalculateQuality(src, baseQuality, factors)
+    
+    -- Get quality tier for display
+    local tierInfo = exports['bldr_core']:GetQualityTier(quality)
     
     -- Calculate and award money with automatic bonuses
     local basePrice = 50  -- $50 per crop
     local totalValue = basePrice * amount
-    local quality = math.random(70, 100)  -- Random quality
     
     -- AddMoney will automatically apply level bonuses and quality bonuses
     local success, finalAmount = exports['bldr_core']:AddMoney(src, totalValue, 'cash', quality)
     
+    -- Update money earned stat
     if success then
+        exports['bldr_core']:UpdateStat(src, 'money_earned', finalAmount)
+        
         TriggerClientEvent('QBCore:Notify', src, 
-            ('Harvested %dx %s | +%d XP | Earned $%d'):format(amount, cropType, xpAmount, finalAmount),
+            ('Harvested %dx %s | Quality: %s | +%d XP | Earned $%d'):format(
+                amount, cropType, tierInfo.label, xpAmount, finalAmount),
             'success')
     end
 end)
 ```
+
+## 🎮 Player Commands
+
+### `/mystats` or `/stats`
+View your personal statistics.
+
+```
+/mystats
+-- Displays your farming stats, crafting stats, economic stats, and total XP
+```
+
+### `/leaderboard [category]` or `/leaders [category]`
+View server leaderboards.
+
+```
+/leaderboard
+-- Shows top players by total XP (default)
+
+/leaderboard plants_harvested
+-- Shows top farmers
+
+/leaders items_crafted
+-- Shows top crafters
+
+/leaderboard money_earned
+-- Shows top earners
+```
+
+Available categories:
+- `total_xp` - Overall progression
+- `plants_harvested` - Farming activity
+- `items_crafted` - Crafting activity
+- `money_earned` - Economic success
 
 ## 🛠️ Admin Commands
 
@@ -279,6 +480,15 @@ Reset a player's progression (admin only).
 ```
 /bldrresetplayer 1
 -- Resets player 1 back to level 0 with 0 XP
+```
+
+### `/refreshleaderboard`
+Manually refresh leaderboard data (admin only).
+
+```
+/refreshleaderboard
+-- Forces immediate update of all leaderboard categories
+-- Useful after manually modifying database or testing
 ```
 
 ## 🔐 Permission System
@@ -436,6 +646,18 @@ For issues, questions, or suggestions:
 4. Check console for error messages
 
 ## 📈 Version History
+
+### 1.2.0 (2025-12-12)
+- **Statistics System** - Comprehensive player stat tracking for all activities
+- **Leaderboards** - Real-time competitive rankings across multiple categories
+- **Quality System** - Multi-factor quality calculation for items and rewards
+- **New Exports** - UpdateStat, GetPlayerStatistics, GetLeaderboard, CalculateQuality, GetQualityTier
+- **Player Commands** - /mystats, /stats, /leaderboard, /leaders
+- **Admin Commands** - /refreshleaderboard for manual leaderboard updates
+- **Database Migration** - Added bldr_player_stats table for statistics storage
+- **Auto-Save Stats** - Statistics now save immediately when updated
+- **Debug Enhancements** - Verbose logging for stat updates and leaderboard operations
+- **Performance** - Optimized leaderboard queries with collation fixes
 
 ### 1.1.0
 - Added advanced logging system
